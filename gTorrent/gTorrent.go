@@ -1,54 +1,110 @@
 package gTorrent
 
 import (
-	"log"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/cenkalti/rain/torrent"
 )
 
-func DownloadTorrent(dir string, magneticLink string) error {
+type gTorrentCfg struct {
+	DataDir string
+}
+
+var gtCfg *gTorrentCfg = &gTorrentCfg{}
+
+func SetDataDir(dir string) {
+	gtCfg.DataDir = dir
+}
+
+func LoadConfig() (torrent.Config, error) {
 	cfg := torrent.DefaultConfig
-	cfg.DataDir = dir
 	cfg.ResumeOnStartup = true
-	ses, err := torrent.NewSession(cfg)
+	if gtCfg.DataDir != "" {
+		cfg.DataDir = gtCfg.DataDir
+	}
+
+	return cfg, nil
+}
+
+func GetSession() (*torrent.Session, error) {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return torrent.NewSession(cfg)
+}
+
+func DownloadTorrent(magneticLink string, acceptDuplicate bool) error {
+	ses, err := GetSession()
 	if err != nil {
 		return err
 	}
+	defer ses.Close()
 
 	magneticLink += ".resume"
-	tor, err := ses.AddURI(magneticLink, nil)
-	if err != nil {
-		return err
+	list := ses.ListTorrents()
+	for _, t := range list {
+		m, err := t.Magnet()
+		if err != nil {
+			return err
+		}
+
+		if MagneticComp(m, magneticLink) && !acceptDuplicate {
+			return fmt.Errorf("duplicate torrent")
+		}
 	}
 
-	for range time.Tick(time.Second) {
-		s := tor.Stats()
-		log.Printf("Status: %s, Downloaded: %d, Total: %d,Peers: %d", s.Status.String(), s.Bytes.Completed, s.Bytes.Total, s.Peers.Total)
+	_, err = ses.AddURI(magneticLink, nil)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
+func MagneticComp(magnetic1 string, magnetic2 string) bool {
+	i := strings.Index(magnetic1, "&")
+	return magnetic1[:i] == magnetic2[:i]
+}
+
 func ListTorrents() ([]*torrent.Torrent, error) {
-	cfg := torrent.DefaultConfig
-	cfg.ResumeOnStartup = true
-	ses, err := torrent.NewSession(cfg)
+	ses, err := GetSession()
 	if err != nil {
 		return nil, err
 	}
+	defer ses.Close()
 
 	return ses.ListTorrents(), nil
 }
 
-func RemoveAllTorrents() error {
-	cfg := torrent.DefaultConfig
-	cfg.ResumeOnStartup = true
-	ses, err := torrent.NewSession(cfg)
+func TorrentsStats(callback func(torrent.Torrent)) error {
+	list, err := ListTorrents()
 	if err != nil {
 		return err
 	}
+
+	go func() {
+		for {
+			for _, t := range list {
+				callback(*t)
+			}
+
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	return nil
+}
+
+func RemoveAllTorrents() error {
+	ses, err := GetSession()
+	if err != nil {
+		return err
+	}
+	defer ses.Close()
 
 	tlist := ses.ListTorrents()
 	for _, t := range tlist {
